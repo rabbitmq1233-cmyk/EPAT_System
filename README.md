@@ -16,7 +16,7 @@ whole system runs offline on synthetic data, and can load your own OHLCV CSVs.
 ```
                         +-------------------------------+
                         |        data/                   |
-                        |  schema, synthetic, CSV       |
+                        | schema, synthetic, CSV, Yahoo |
                         +---------------+---------------+
                                         | OHLCV DataFrame
                                         v
@@ -61,8 +61,9 @@ pip install -e .                         # install the `epat` package + CLI
 ```
 
 Every statistics routine (OLS, ADF, cointegration, PCA, logistic regression,
-GMM/EM, GARCH grid-search) is implemented on **pure NumPy**, so nothing extra
-is required to run.
+GMM/EM, GARCH grid-search) is implemented on **pure NumPy**, and Yahoo Finance
+data is fetched with the standard-library `urllib` — so no extra packages are
+required to run.
 
 ---
 
@@ -71,19 +72,27 @@ is required to run.
 ### CLI
 
 ```bash
+python -m epat fetch --symbol RELIANCE.NS --start 2018-01-01 --out data/RELIANCE.csv
 python -m epat list                         # list strategies
 python -m epat demo                         # synthetic MA-crossover backtest
-python -m epat backtest --strategy ma_crossover --set fast=10 --set slow=40
+python -m epat backtest --symbol ^NSEI --period 5y --strategy ma_crossover --set fast=10 --set slow=40
 python -m epat backtest --strategy breakout_atr --engine event --stops
 python -m epat optimize --strategy ma_crossover --grid fast=5,10,20 --grid slow=40,60 --metric sharpe
-python -m epat pairs                        # cointegration pairs trade
-python -m epat pca --assets 4               # PCA statistical arbitrage
-python -m epat ml --lags 5                  # walk-forward ML direction
-python -m epat scan-vol --regime            # EWMA / GARCH / variance premium
+python -m epat pairs --symbol HDFCBANK.NS --symbol2 ICICIBANK.NS --period 3y
+python -m epat pca --symbols RELIANCE.NS,TCS.NS,INFY.NS --period 3y
+python -m epat ml --symbol AAPL --period 5y --lags 5
+python -m epat scan-vol --symbol ^NSEI --period 3y
 ```
 
-Common flags: `--data path.csv` (else synthetic), `--bars`, `--seed`,
-`--commission-bps`, `--slippage-bps`, `--report out.txt`, `--html out.html`.
+**Data source priority:** `--symbol` (Yahoo Finance) > `--data file.csv` >
+synthetic generator. Yahoo flags: `--start/--end`, `--period`
+(`1mo`…`5y`/`max`), `--interval` (`1d`, `1wk`, `60m`, …), `--no-adjust`
+(disable split/dividend adjustment). Indian tickers use Yahoo suffixes —
+`.NS` (NSE), `.BO` (BSE) — and indices are `^`-prefixed (`^NSEI` Nifty 50,
+`^NSEBANK` Bank Nifty, `^BSESN` Sensex).
+
+Common flags: `--bars`, `--seed`, `--commission-bps`, `--slippage-bps`,
+`--report out.txt`, `--html out.html`.
 
 ### Python API
 
@@ -113,6 +122,7 @@ python examples/run_pipeline_smoke.py   # exercises every major pipeline
 
 | Area | Contents |
 | --- | --- |
+| `data` | schema validation, synthetic OHLCV generator, CSV loader, **Yahoo Finance fetcher** (`fetch_yahoo`, `save_yahoo_csv`, `parse_chart`; stdlib-only, split/dividend-adjusted, NSE/BSE via `.NS`/`.BO`, indices `^NSEI`/`^BSESN`) |
 | `indicators` | `sma`, `ema`, `rsi(14)` (Wilder), `true_range`, `atr` (EMA form `ATR_t=(ATR_{t-1}(n-1)+TR_t)/n`), `bollinger`, `parkinson_vol` (`sqrt(mean(ln(H/L)^2)/(4ln2)·ann)`), `vwap` (`Σ(p·v)/Σv`), `zscore`, `ols`, `adf`, `half_life`, `cointegration` |
 | `engine` | `run_vectorized` (position×return, one-bar lag, turnover costs) and `run_event_driven` (bar-by-bar, ATR stops, intrabar high/low fills), `CostModel`, trade blotter |
 | `risk` | `kelly_binary` (`f=(pb−aq)/(ab)`), `kelly_continuous` (`f=μ/σ²`), `fractional_kelly`, `fixed_fraction_size`, `volatility_target`, `atr_position_size`, `atr_stop_levels`, `trailing_stop` |
@@ -152,17 +162,26 @@ and Nifty-style index work in the portfolio/stat-arb modules.
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
-101 unit tests cover data schema, indicators/statistics (including ADF on white
-noise vs. random walk and cointegration on a constructed pair), metrics,
-sizing/stops, both engines, all strategies, options (BS vs. known values,
-parity, IV round-trip, GARCH), ML (logreg, walk-forward, GMM recovery), and
-portfolio analytics.
+118 unit tests cover data schema, the Yahoo Finance parser/URL builder,
+indicators/statistics (including ADF on white noise vs. random walk and
+cointegration on a constructed pair), metrics, sizing/stops, both engines, all
+strategies, options (BS vs. known values, parity, IV round-trip, GARCH), ML
+(logreg, walk-forward, GMM recovery), and portfolio analytics.
+
+Live Yahoo Finance tests are opt-in (they require network access):
+
+```bash
+EPAT_NETWORK_TESTS=1 python -m unittest tests.test_yahoo -v
+```
 
 ---
 
 ## Limitations / notes
 
 - **No live broker integration** in this build. The engine is research-grade.
+- Yahoo Finance is an unofficial, rate-limited endpoint; the fetcher retries on
+  transient failures but heavy use can be throttled. Cache downloads with
+  `python -m epat fetch ... --out data/NAME.csv` and reuse via `--data`.
 - ADF critical values / p-values use large-sample approximations; the pure-NumPy
   implementations are suitable for screening — use `statsmodels`/`arch` for
   publication-grade inference.

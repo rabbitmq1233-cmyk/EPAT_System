@@ -21,6 +21,11 @@ htmlcov/
 .coverage
 coverage.xml
 
+# Downloaded market data (reproducible with `python -m epat fetch`).
+# The bundled synthetic sample is kept.
+data/*.csv
+!data/SYNTH.csv
+
 # OS / editors
 .DS_Store
 Thumbs.db

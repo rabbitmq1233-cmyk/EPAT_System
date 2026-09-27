@@ -2,9 +2,9 @@
 
 Examples
 --------
+    python -m epat fetch --symbol RELIANCE.NS --start 2018-01-01 --out data/RELIANCE.csv
+    python -m epat backtest --symbol ^NSEI --period 5y --strategy ma_crossover --set fast=10 --set slow=40
     python -m epat demo
-    python -m epat backtest --strategy ma_crossover --set fast=10 --set slow=40
-    python -m epat optimize --strategy ma_crossover --grid fast=5,10,20 --grid slow=40,60
     python -m epat pairs --assets 2
     python -m epat pca --assets 4
     python -m epat ml
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from epat.data import generate_multi, generate_ohlcv, load_csv
+from epat.data import fetch_yahoo, generate_multi, generate_ohlcv, load_csv, save_csv
 from epat.engine import CostModel, EventConfig, run_from_returns, run_event_driven, run_vectorized
 from epat.indicators import atr
 from epat.options import ewma_vol, garch11_fit, premium_stats, realised_vol
@@ -50,6 +50,16 @@ def _parse_params(items: list[str]) -> dict:
 
 
 def _load_price_data(args) -> pd.DataFrame:
+    """Resolve the price data source: Yahoo symbol > CSV file > synthetic."""
+    if getattr(args, "symbol", None):
+        return fetch_yahoo(
+            args.symbol,
+            start=getattr(args, "start", None),
+            end=getattr(args, "end", None),
+            period=getattr(args, "period", "1y"),
+            interval=getattr(args, "interval", "1d"),
+            adjust=getattr(args, "adjust", True),
+        )
     if getattr(args, "data", None):
         return load_csv(args.data)
     return generate_ohlcv(
@@ -86,7 +96,7 @@ def cmd_list(_args) -> int:
 
 
 def cmd_demo(args) -> int:
-    df = generate_ohlcv(n=args.bars, seed=args.seed, regime=True)
+    df = _load_price_data(args)
     signal = get_strategy("ma_crossover")(df, fast=10, slow=40)
     result = run_vectorized(
         df["close"], signal, cost_model=_cost_model(args), name="demo-ma-crossover"
@@ -164,7 +174,17 @@ def cmd_optimize(args) -> int:
 
 
 def cmd_pairs(args) -> int:
-    if args.data and args.data2:
+    if getattr(args, "symbol", None) and getattr(args, "symbol2", None):
+        common = dict(
+            start=args.start,
+            end=args.end,
+            period=args.period,
+            interval=args.interval,
+            adjust=args.adjust,
+        )
+        y = fetch_yahoo(args.symbol, **common)["close"]
+        x = fetch_yahoo(args.symbol2, **common)["close"]
+    elif args.data and args.data2:
         y = load_csv(args.data)["close"]
         x = load_csv(args.data2)["close"]
     else:
@@ -183,13 +203,29 @@ def cmd_pairs(args) -> int:
 
 
 def cmd_pca(args) -> int:
-    if args.data:
-        raise SystemExit(
-            "PCA needs a multi-asset panel; use --assets with synthetic data "
-            "or extend the loader for a multi-symbol CSV"
+    symbols = getattr(args, "symbols", None)
+    if symbols:
+        names = [s.strip() for s in symbols.split(",") if s.strip()]
+        if len(names) < 2:
+            raise SystemExit("--symbols needs at least two comma-separated Yahoo symbols")
+        common = dict(
+            start=args.start,
+            end=args.end,
+            period=args.period,
+            interval=args.interval,
+            adjust=args.adjust,
         )
-    multi = generate_multi(n_assets=args.assets, n=args.bars, seed=args.seed)
-    prices = pd.DataFrame({k: v["close"] for k, v in multi.items()})
+        panel = {name: fetch_yahoo(name, **common)["close"] for name in names}
+        prices = pd.DataFrame(panel).dropna(how="any")
+        print(f"PCA panel: {list(panel)} | {prices.shape[0]} aligned bars")
+    elif args.data:
+        raise SystemExit(
+            "PCA needs a multi-asset panel; pass --symbols A.NS,B.NS,C.NS "
+            "(Yahoo) or use --assets with synthetic data"
+        )
+    else:
+        multi = generate_multi(n_assets=args.assets, n=args.bars, seed=args.seed)
+        prices = pd.DataFrame({k: v["close"] for k, v in multi.items()})
 
     res = pca_statarb(prices, n_components=args.components, window=args.window, entry_z=args.entry_z)
     result = run_from_returns(
@@ -245,7 +281,55 @@ def cmd_scan_vol(args) -> int:
     return 0
 
 
+def cmd_fetch(args) -> int:
+    if not args.symbol:
+        raise SystemExit("fetch requires --symbol (e.g. RELIANCE.NS, ^NSEI, AAPL)")
+    df = fetch_yahoo(
+        args.symbol,
+        start=args.start,
+        end=args.end,
+        period=args.period,
+        interval=args.interval,
+        adjust=args.adjust,
+    )
+    print(
+        f"{args.symbol}: {df.shape[0]} bars  "
+        f"{df.index[0].date()} -> {df.index[-1].date()}  (interval={args.interval})"
+    )
+    print(df.tail(3).to_string())
+    if args.out:
+        print(f"\nsaved -> {save_csv(df, args.out)}")
+    return 0
+
+
+def _add_yahoo_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--symbol",
+        default=None,
+        help="Yahoo Finance symbol (e.g. RELIANCE.NS, ^NSEI, AAPL); overrides --data",
+    )
+    parser.add_argument("--start", default=None, help="start date for --symbol (YYYY-MM-DD)")
+    parser.add_argument("--end", default=None, help="end date for --symbol (YYYY-MM-DD)")
+    parser.add_argument(
+        "--period",
+        default="1y",
+        help="Yahoo range when no dates given (1mo, 6mo, 1y, 5y, max)",
+    )
+    parser.add_argument(
+        "--interval",
+        default="1d",
+        help="bar interval (1d, 1wk, 1mo, 60m, 15m, ...)",
+    )
+    parser.add_argument(
+        "--no-adjust",
+        dest="adjust",
+        action="store_false",
+        help="do not adjust prices for splits/dividends",
+    )
+
+
 def _add_common_data_args(parser: argparse.ArgumentParser) -> None:
+    _add_yahoo_args(parser)
     parser.add_argument("--data", type=Path, default=None, help="CSV file with OHLCV data")
     parser.add_argument("--bars", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=42)
@@ -268,10 +352,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_list = sub.add_parser("list", help="list strategies")
     p_list.set_defaults(func=cmd_list)
 
+    p_fetch = sub.add_parser("fetch", help="download OHLCV from Yahoo Finance")
+    _add_yahoo_args(p_fetch)
+    p_fetch.add_argument("--out", type=Path, default=None, help="output CSV path")
+    p_fetch.set_defaults(func=cmd_fetch)
+
     p_demo = sub.add_parser("demo", help="run a synthetic MA-crossover backtest")
     _add_common_data_args(p_demo)
     _add_cost_args(p_demo)
-    p_demo.set_defaults(func=cmd_demo)
+    p_demo.set_defaults(func=cmd_demo, regime=True)
 
     p_bt = sub.add_parser("backtest", help="backtest a registered strategy")
     _add_common_data_args(p_bt)
@@ -300,6 +389,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_data_args(p_pairs)
     _add_cost_args(p_pairs)
     p_pairs.add_argument("--data2", type=Path, default=None)
+    p_pairs.add_argument("--symbol2", default=None, help="second Yahoo symbol for the pairs trade")
     p_pairs.add_argument("--train", type=int, default=120)
     p_pairs.add_argument("--window", type=int, default=60)
     p_pairs.add_argument("--entry-z", type=float, default=2.0)
@@ -308,6 +398,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_pca = sub.add_parser("pca", help="PCA statistical arbitrage")
     _add_common_data_args(p_pca)
     _add_cost_args(p_pca)
+    p_pca.add_argument(
+        "--symbols",
+        default=None,
+        help="comma-separated Yahoo symbols for the panel (e.g. RELIANCE.NS,TCS.NS,INFY.NS)",
+    )
     p_pca.add_argument("--assets", type=int, default=4)
     p_pca.add_argument("--components", type=int, default=1)
     p_pca.add_argument("--window", type=int, default=20)
