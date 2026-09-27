@@ -1,0 +1,11 @@
+# Core (required)
+numpy>=1.26
+pandas>=2.0
+
+# Optional extras — the toolkit runs without them, but enables:
+#   - faster/fitted GARCH optimiser (scipy)
+#   - sklearn-backed ML models (scikit-learn)
+#   - richer plots in reports (matplotlib)
+# scipy>=1.11
+# scikit-learn>=1.4
+# matplotlib>=3.8
