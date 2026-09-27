@@ -59,10 +59,11 @@ def _trade_stats(trades: pd.DataFrame) -> dict[str, float]:
     }
 
 
-def tearsheet(result: BacktestResult) -> str:
-    """Full text tearsheet for a backtest result."""
-    blocks = [format_metrics(result.metrics, title=f"Performance - {result.name}")]
-    stats = _trade_stats(result.trades)
+def tearsheet(result) -> str:
+    """Full text tearsheet for a backtest / portfolio / execution result."""
+    name = getattr(result, "name", "result")
+    blocks = [format_metrics(result.metrics, title=f"Performance - {name}")]
+    stats = _trade_stats(getattr(result, "trades", None))
     blocks.append(
         format_metrics(
             {
@@ -106,7 +107,7 @@ def plot_equity(result: BacktestResult, path: str | Path | None = None):
         return None
 
     fig, ax = plt.subplots(figsize=(10, 4))
-    result.equity.plot(ax=ax, title=f"Equity - {result.name}")
+    result.equity.plot(ax=ax, title=f"Equity - {getattr(result, 'name', 'result')}")
     ax.set_xlabel("date")
     ax.set_ylabel("equity")
     path = Path(path)
@@ -117,7 +118,7 @@ def plot_equity(result: BacktestResult, path: str | Path | None = None):
     return path
 
 
-def _equity_png_base64(result: BacktestResult) -> str | None:
+def _equity_png_base64(result) -> str | None:
     try:  # pragma: no cover - environment dependent
         import matplotlib
 
@@ -129,7 +130,7 @@ def _equity_png_base64(result: BacktestResult) -> str | None:
         return None
 
     fig, ax = plt.subplots(figsize=(10, 4))
-    result.equity.plot(ax=ax, title=f"Equity - {result.name}")
+    result.equity.plot(ax=ax, title=f"Equity - {getattr(result, 'name', 'result')}")
     buf = io.BytesIO()
     fig.tight_layout()
     fig.savefig(buf, format="png", dpi=110)
@@ -150,7 +151,7 @@ def write_html_report(result: BacktestResult, path: str | Path) -> Path:
         f'<img alt="equity curve" src="data:image/png;base64,{img}"/>' if img else ""
     )
     html = f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>EPAT report - {result.name}</title>
+<html><head><meta charset="utf-8"><title>EPAT report - {getattr(result, 'name', 'result')}</title>
 <style>
 body {{ font-family: system-ui, sans-serif; margin: 2rem; color: #1b1b1b; }}
 h1 {{ font-size: 1.3rem; }} table {{ border-collapse: collapse; margin: 1rem 0; }}
@@ -158,7 +159,7 @@ td {{ border-bottom: 1px solid #eee; padding: 4px 12px; }}
 img {{ max-width: 100%; height: auto; }}
 </style></head>
 <body>
-<h1>Backtest report - {result.name}</h1>
+<h1>Backtest report - {getattr(result, 'name', 'result')}</h1>
 <table>{rows}</table>
 {img_tag}
 </body></html>

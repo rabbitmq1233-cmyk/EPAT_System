@@ -15,6 +15,33 @@ from epat.engine.trades import extract_trades, extract_trades_from_returns
 from epat.metrics import summarize
 
 
+def net_returns(
+    prices: pd.Series,
+    positions: pd.Series,
+    *,
+    cost_model: CostModel | None = None,
+) -> pd.Series:
+    """Net-of-cost strategy return stream for a price series and positions.
+
+    Positions are shifted one bar (no look-ahead) and costs are charged on
+    turnover. Shared by :func:`run_vectorized` and the portfolio pipeline.
+    """
+    price = pd.Series(prices, dtype="float64").dropna()
+    pos = pd.Series(positions, dtype="float64").reindex(price.index).fillna(0.0)
+    costs = cost_model or CostModel()
+
+    asset_ret = price.pct_change().fillna(0.0)
+    effective = pos.shift(1).fillna(0.0)
+    gross = effective * asset_ret
+
+    turnover = effective.diff()
+    if turnover.size:
+        turnover.iloc[0] = effective.iloc[0]
+    turnover = turnover.abs().fillna(0.0)
+    cost = turnover * (costs.commission_rate + costs.slippage_rate)
+    return (gross - cost).rename("returns")
+
+
 def run_vectorized(
     prices: pd.Series,
     positions: pd.Series,
@@ -46,19 +73,10 @@ def run_vectorized(
     pos = pd.Series(positions, dtype="float64").reindex(price.index).fillna(0.0)
     costs = cost_model or CostModel()
 
-    asset_ret = price.pct_change().fillna(0.0)
-    effective = pos.shift(1).fillna(0.0)
-    gross = effective * asset_ret
-
-    turnover = effective.diff()
-    if turnover.size:
-        turnover.iloc[0] = effective.iloc[0]
-    turnover = turnover.abs().fillna(0.0)
-    cost = turnover * (costs.commission_rate + costs.slippage_rate)
-
-    net = (gross - cost).rename("returns")
+    net = net_returns(price, pos, cost_model=costs)
     equity = (initial_capital * (1.0 + net).cumprod()).rename("equity")
 
+    effective = pos.shift(1).fillna(0.0)
     trades = extract_trades(effective, price)
     metrics = summarize(
         equity,

@@ -1,4 +1,4 @@
-"""Portfolio construction and allocation."""
+"""Portfolio construction, allocation and multi-asset backtesting."""
 
 from __future__ import annotations
 
@@ -14,6 +14,14 @@ from epat.portfolio.allocation import (
     portfolio_volatility,
     random_portfolios,
 )
+from epat.portfolio.pipeline import (
+    ALLOCATION_METHODS,
+    SIZING_METHODS,
+    PortfolioBacktestResult,
+    apply_sizing,
+    estimate_weight_history,
+    run_portfolio_backtest,
+)
 
 __all__ = [
     "equal_weights",
@@ -26,4 +34,10 @@ __all__ = [
     "kelly_allocation",
     "random_portfolios",
     "efficient_frontier",
+    "run_portfolio_backtest",
+    "estimate_weight_history",
+    "apply_sizing",
+    "PortfolioBacktestResult",
+    "SIZING_METHODS",
+    "ALLOCATION_METHODS",
 ]

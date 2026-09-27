@@ -6,7 +6,7 @@ from epat.engine.costs import CostModel
 from epat.engine.event_driven import EventConfig, run_event_driven
 from epat.engine.result import BacktestResult
 from epat.engine.trades import extract_trades, extract_trades_from_returns
-from epat.engine.vectorized import run_from_returns, run_vectorized
+from epat.engine.vectorized import net_returns, run_from_returns, run_vectorized
 
 __all__ = [
     "CostModel",
@@ -17,4 +17,5 @@ __all__ = [
     "run_event_driven",
     "extract_trades",
     "extract_trades_from_returns",
+    "net_returns",
 ]

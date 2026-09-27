@@ -20,10 +20,19 @@ from pathlib import Path
 
 import pandas as pd
 
+from epat.brokers import (
+    ExecutionConfig,
+    OrderType,
+    ProductType,
+    get_broker,
+    list_brokers,
+    trade_signals,
+)
 from epat.data import fetch_yahoo, generate_multi, generate_ohlcv, load_csv, save_csv
 from epat.engine import CostModel, EventConfig, run_from_returns, run_event_driven, run_vectorized
 from epat.indicators import atr
 from epat.options import ewma_vol, garch11_fit, premium_stats, realised_vol
+from epat.portfolio import ALLOCATION_METHODS, SIZING_METHODS, run_portfolio_backtest
 from epat.reporting import tearsheet, write_html_report, write_tearsheet
 from epat.strategies import get_strategy, list_strategies, pairs, pca_statarb
 
@@ -302,6 +311,123 @@ def cmd_fetch(args) -> int:
     return 0
 
 
+def cmd_brokers(_args) -> int:
+    print("Available broker adapters:")
+    for name in list_brokers():
+        print(f"  - {name}")
+    print(
+        "\n  mock   : fully offline paper trading (no credentials)\n"
+        "  zerodha: Kite Connect (needs --api-key/--api-secret via the Python API)\n"
+        "  upstox : Upstox v2 (needs api key/secret/redirect via the Python API)\n"
+        "  ib     : Interactive Brokers (needs `pip install ib_insync` or `ib_async`)"
+    )
+    return 0
+
+
+def _panel_from_args(args) -> dict:
+    """Build an ``{asset: OHLCV}`` panel from --symbols (Yahoo) or synthetic data."""
+    if getattr(args, "symbols", None):
+        names = [s.strip() for s in args.symbols.split(",") if s.strip()]
+        if len(names) < 1:
+            raise SystemExit("--symbols needs at least one comma-separated symbol")
+        common = dict(
+            start=args.start,
+            end=args.end,
+            period=args.period,
+            interval=args.interval,
+            adjust=args.adjust,
+        )
+        return {name: fetch_yahoo(name, **common) for name in names}
+    return generate_multi(
+        n_assets=args.assets, n=args.bars, seed=args.seed, avg_corr=args.corr
+    )
+
+
+def cmd_portfolio(args) -> int:
+    import epat.ml  # noqa: F401  (registers ml_direction)
+
+    frames = _panel_from_args(args)
+    prices = pd.DataFrame({k: v["close"] for k, v in frames.items()}).dropna(how="any")
+    params = _parse_params(args.set)
+    signals = pd.DataFrame(
+        {k: get_strategy(args.strategy)(v, **params) for k, v in frames.items()}
+    ).reindex(prices.index).fillna(0.0)
+
+    result = run_portfolio_backtest(
+        prices,
+        signals,
+        name=f"portfolio-{args.strategy}",
+        sizing=args.sizing,
+        sizing_fraction=args.size,
+        target_vol=args.target_vol,
+        sizing_window=args.sizing_window,
+        allocation=args.allocation,
+        allocation_window=args.allocation_window,
+        rebalance=args.rebalance,
+        long_only=not args.allow_short,
+        cost_model=_cost_model(args),
+    )
+
+    print(f"Assets: {list(prices.columns)} | bars: {len(prices)} | strategy: {args.strategy}")
+    print("\nPer-asset Sharpe (net of costs):")
+    for name, backtest in result.per_asset.items():
+        print(f"  {name:<16} {backtest.metrics['sharpe']:+.3f}")
+    print("\nCorrelation of net strategy returns:")
+    print(result.correlation.round(3).to_string())
+    print("\nAllocation weights (latest):")
+    print(result.weights.round(4).to_string())
+    print()
+    _emit(result, args)
+    return 0
+
+
+def cmd_paper(args) -> int:
+    import epat.ml  # noqa: F401
+
+    if args.broker != "mock":
+        raise SystemExit(
+            f"'{args.broker}' needs credentials and a live session; construct it in "
+            "Python via epat.brokers.get_broker(...). For CLI paper trading use "
+            "--broker mock."
+        )
+
+    df = _load_price_data(args)
+    symbol = args.symbol or "SYNTH"
+    signal = get_strategy(args.strategy)(df, **_parse_params(args.set))
+
+    broker = get_broker(
+        args.broker,
+        initial_cash=args.capital,
+        commission_bps=args.commission_bps,
+        slippage_bps=args.slippage_bps,
+    )
+    if hasattr(broker, "load_history"):
+        broker.load_history(symbol, df)
+
+    config = ExecutionConfig(
+        size_fraction=args.size,
+        product=ProductType.DELIVERY,
+        order_type=OrderType.MARKET,
+        allow_short=args.allow_short,
+    )
+    result = trade_signals(broker, symbol, df["close"], signal, config=config)
+
+    print(f"Broker: {broker.name} | symbol: {symbol} | bars: {len(df)} | orders: {len(result.orders)}")
+    if len(result.orders):
+        print("\nOrders:")
+        print(result.orders.head(args.show_orders).to_string(index=False))
+    print("\nPositions:")
+    print(result.positions.to_string(index=False) if len(result.positions) else "  (flat)")
+    print()
+    print(tearsheet(result))
+    print(f"\nRealised P&L: {result.metrics.get('realised_pnl', float('nan')):,.2f}")
+    if getattr(args, "report", None):
+        print(f"\nsaved tearsheet -> {write_tearsheet(result, args.report)}")
+    if getattr(args, "html", None):
+        print(f"saved html      -> {write_html_report(result, args.html)}")
+    return 0
+
+
 def _add_yahoo_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--symbol",
@@ -356,6 +482,41 @@ def build_parser() -> argparse.ArgumentParser:
     _add_yahoo_args(p_fetch)
     p_fetch.add_argument("--out", type=Path, default=None, help="output CSV path")
     p_fetch.set_defaults(func=cmd_fetch)
+
+    p_brokers = sub.add_parser("brokers", help="list broker adapters")
+    p_brokers.set_defaults(func=cmd_brokers)
+
+    p_port = sub.add_parser("portfolio", help="multi-asset portfolio backtest")
+    _add_yahoo_args(p_port)
+    _add_cost_args(p_port)
+    p_port.add_argument("--symbols", default=None, help="comma-separated Yahoo symbols")
+    p_port.add_argument("--assets", type=int, default=4, help="number of synthetic assets")
+    p_port.add_argument("--bars", type=int, default=750)
+    p_port.add_argument("--seed", type=int, default=42)
+    p_port.add_argument("--corr", type=float, default=0.4, help="synthetic average correlation")
+    p_port.add_argument("--strategy", default="ma_crossover")
+    p_port.add_argument("--set", action="append", default=[], help="strategy param key=value")
+    p_port.add_argument("--sizing", choices=SIZING_METHODS, default="none")
+    p_port.add_argument("--size", type=float, default=1.0, help="fixed sizing fraction")
+    p_port.add_argument("--target-vol", type=float, default=0.15)
+    p_port.add_argument("--sizing-window", type=int, default=60)
+    p_port.add_argument("--allocation", choices=ALLOCATION_METHODS, default="equal")
+    p_port.add_argument("--allocation-window", type=int, default=80)
+    p_port.add_argument("--rebalance", type=int, default=None, help="rebalance every N bars")
+    p_port.add_argument("--allow-short", action="store_true")
+    p_port.set_defaults(func=cmd_portfolio)
+
+    p_paper = sub.add_parser("paper", help="paper-trade a strategy through a broker")
+    _add_common_data_args(p_paper)
+    _add_cost_args(p_paper)
+    p_paper.add_argument("--broker", default="mock", help="broker adapter name")
+    p_paper.add_argument("--strategy", default="ma_crossover")
+    p_paper.add_argument("--set", action="append", default=[], help="strategy param key=value")
+    p_paper.add_argument("--capital", type=float, default=1_000_000.0)
+    p_paper.add_argument("--size", type=float, default=1.0, help="fraction of equity per position")
+    p_paper.add_argument("--allow-short", action="store_true")
+    p_paper.add_argument("--show-orders", type=int, default=15)
+    p_paper.set_defaults(func=cmd_paper)
 
     p_demo = sub.add_parser("demo", help="run a synthetic MA-crossover backtest")
     _add_common_data_args(p_demo)
